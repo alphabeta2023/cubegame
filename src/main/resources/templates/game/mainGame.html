@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>立方的一生 - 3D Cube Adventure</title>
+    <style>
+        /* 原有样式保持不变 */
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #fullscreen-prompt {
+            position: absolute;
+            top: 25%;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(128, 128, 128, 0.3);
+            color: white;
+            padding: 20px 40px;
+            border-radius: 10px;
+            text-align: center;
+            font-family: Arial, sans-serif;
+            z-index: 100;
+            pointer-events: none;
+            transition: opacity 0.5s;
+            border: 1px solid rgba(128, 128, 128, 0.7);
+        }
+        #fullscreen-prompt.hidden {
+            opacity: 0;
+        }
+        #click-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 99;
+            cursor: pointer;
+        }
+        /* 控制提示样式 */
+        .controls-hint {
+            position: absolute;
+            bottom: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            font-family: Arial, sans-serif;
+            font-size: 0.9rem;
+            z-index: 100;
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+        #camera-hint {
+            left: 30%;
+            transform: translateX(-50%);
+        }
+        #movement-hint {
+            left: 70%;
+            transform: translateX(-50%);
+        }
+        .controls-hint.hidden {
+            opacity: 0;
+        }
+    </style>
+</head>
+<body>
+<div id="fullscreen-prompt">点击任意处开启星际航行模式～</div>
+<div id="click-overlay"></div>
+<div id="camera-hint" class="controls-hint">鼠标转动望远镜🔭</div>
+<div id="movement-hint" class="controls-hint">>WSAD/方向键驾驶方块飞船🚀</div>
+<div id="minimap-container" style="position: absolute; top: 10px; left: 10px; width: 200px; height: 200px; border: 2px solid rgba(255,255,255,0.5); z-index: 100;">
+    <canvas id="minimap" width="200" height="200"></canvas>
+</div>
+<div id="game-timer" style="position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: #00bfff; font-size: 1.5rem; z-index: 100; text-shadow: 0 0 10px rgba(0, 191, 255, 0.7);">
+    [[${remainingTime}]]
+</div>
+
+<script src="/game/js/three.js"></script>
+<script th:inline="javascript">
+    // 从localStorage获取token
+    const token = [[${token}]] || localStorage.getItem('authToken');
+    if (!token) {
+        console.log("未检测到登录状态，请重新登录");
+        // Token不存在时，先清除可能的登录状态再跳转
+        fetch('/logout', { method: 'POST' })
+            .finally(() => {
+                setTimeout(() => window.location.href = '/', 2000);
+            });
+    }
+
+    // 从Thymeleaf模型获取参数
+    const cubeConfig = {
+        position: {
+            x: /*[[${cube?.position?.x != null ? cube.position.x : 0}]]*/ 0,
+            y: /*[[${cube?.position?.y != null ? cube.position.y : 0}]]*/ 0,
+            z: /*[[${cube?.position?.z != null ? cube.position.z : 0}]]*/ 0
+        },
+        color: /*[[${cube?.color != null ? cube.color : '#FFFFFF'}]]*/ '#FFFFFF',
+        size: /*[[${cube?.size != null ? cube.size : 0}]]*/ 0,
+        renderOrder: /*[[${cube?.renderOrder != null ? cube.renderOrder : 0}]]*/ 0
+    };
+
+    console.log("Cube Config: ", cubeConfig);
+    const cameraConfig = {
+        x: /*[[${cameraPosition?.x != null ? cameraPosition.x : 0}]]*/ 0,
+        y: /*[[${cameraPosition?.y != null ? cameraPosition.y : 0}]]*/ 0,
+        z: /*[[${cameraPosition?.z != null ? cameraPosition.z : 0}]]*/ 0
+    };
+    console.log("Camera Config: ", cameraConfig);
+    const mapDataList = /*[[${mapDataList}]]*/ [];
+    console.log("Map Data List: ", mapDataList);
+    let userPropCubes = /*[[${userPropCubes}]]*/ [];
+    console.log("Prop Cubes: ", userPropCubes);
+</script>
+<!--<script src="/game/js/three.js"></script>-->
+<script src="/game/js/meteor.js" type="module"></script>
+<script src="/game/js/three-init.js"></script>
+<script src="/game/js/controls.js"></script>
+<script src="/game/js/timecheck.js"></script>
+<script src="/game/js/animation.js"></script>
+<script src="/game/js/utils.js"></script>
+<script src="/game/js/collision-detection.js"></script>
+
+<script>
+    // 初始化游戏
+    function initGame() {
+        console.log("初始化游戏");
+        resumeGame();
+        // 模块加载完成后再调用
+        initThreeScene(cubeConfig, cameraConfig);
+        setupControls();
+        initTimeCheck();
+        setupEventListeners();
+        animate();
+    }
+
+    // 当页面所有资源加载完成后调用初始化函数
+    window.onload = function() {
+        initGame();
+    };
+
+    function initPauseResumeListener() {
+        // 监听页面可见性变化
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                // 页面隐藏（用户离开游戏），暂停计时
+                pauseGame();
+            } else {
+                // 恢复计时
+                resumeGame();
+            }
+        });
+
+        // 监听页面关闭/刷新事件（作为补充）
+        window.addEventListener('beforeunload', () => {
+            pauseGame();
+        });
+    }
+
+    // 暂停游戏请求
+    function pauseGame() {
+        if (!token) return;
+        fetch('/api/game/pause', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + token,
+                'Content-Type': 'application/json'
+            }
+        }).catch(error => console.error('暂停游戏失败:', error));
+    }
+
+    // 继续游戏请求
+    function resumeGame() {
+        if (!token) return;
+        fetch('/api/game/resume', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + token,
+                'Content-Type': 'application/json'
+            }
+        }).then(response => {
+            if (response.ok) {
+                // 继续计时后重新初始化时间检查
+                initTimeCheck();
+            }
+        }).catch(error => console.error('继续游戏失败:', error));
+    }
+
+    // 页面加载时初始化监听
+    initPauseResumeListener();
+</script>
+</body>
+</html>
